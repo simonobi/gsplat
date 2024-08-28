@@ -36,7 +36,7 @@ def rasterization(
     sparse_grad: bool = False,
     absgrad: bool = False,
     rasterize_mode: Literal["classic", "antialiased"] = "classic",
-) -> Tuple[Tensor, Tensor, Dict]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict]:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
 
     This function provides a handful features for 3D Gaussian rasterization, which
@@ -295,7 +295,7 @@ def rasterization(
         colors = depths[..., None]
     else:  # RGB
         pass
-    render_colors, render_alphas = rasterize_to_pixels(
+    render_colors, render_alphas, render_normals, render_depths = rasterize_to_pixels(
         means2d,
         conics,
         colors,
@@ -337,7 +337,7 @@ def rasterization(
         "height": height,
         "tile_size": tile_size,
     }
-    return render_colors, render_alphas, meta
+    return render_colors, render_alphas, render_normals, render_depths, meta
 
 
 def rasterization_legacy_wrapper(

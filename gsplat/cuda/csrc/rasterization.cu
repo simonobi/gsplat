@@ -517,8 +517,11 @@ __global__ void rasterize_to_pixels_fwd_kernel(
     const int32_t *__restrict__ flatten_ids,  // [n_isects]
     float *__restrict__ render_colors, // [C, image_height, image_width, COLOR_DIM]
     float *__restrict__ render_alphas, // [C, image_height, image_width, 1]
+    float *__restrict__ render_normals, // [C, image_height, image_width, COLOR_DIM]
+    float *__restrict__ render_depths, // [C, image_height, image_width, 1]
     int32_t *__restrict__ last_ids     // [C, image_height, image_width]
-) {
+) 
+{
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
 
@@ -531,8 +534,11 @@ __global__ void rasterize_to_pixels_fwd_kernel(
     tile_offsets += camera_id * tile_height * tile_width;
     render_colors += camera_id * image_height * image_width * COLOR_DIM;
     render_alphas += camera_id * image_height * image_width;
+    render_normals += camera_id * image_height * image_width * COLOR_DIM;
+    render_depths += camera_id * image_height * image_width;
     last_ids += camera_id * image_height * image_width;
-    if (backgrounds != nullptr) {
+    if (backgrounds != nullptr) 
+    {
         backgrounds += camera_id * COLOR_DIM;
     }
 
@@ -574,10 +580,12 @@ __global__ void rasterize_to_pixels_fwd_kernel(
     uint32_t tr = block.thread_rank();
 
     float pix_out[COLOR_DIM] = {0.f};
-    for (uint32_t b = 0; b < num_batches; ++b) {
+    for (uint32_t b = 0; b < num_batches; ++b) 
+    {
         // resync all threads before beginning next batch
         // end early if entire tile is done
-        if (__syncthreads_count(done) >= block_size) {
+        if (__syncthreads_count(done) >= block_size) 
+        {
             break;
         }
 
@@ -585,7 +593,8 @@ __global__ void rasterize_to_pixels_fwd_kernel(
         // index of gaussian to load
         uint32_t batch_start = range_start + block_size * b;
         uint32_t idx = batch_start + tr;
-        if (idx < range_end) {
+        if (idx < range_end) 
+        {
             int32_t g = flatten_ids[idx]; // flatten index in [C * N] or [nnz]
             id_batch[tr] = g;
             const float2 xy = means2d[g];
@@ -599,7 +608,8 @@ __global__ void rasterize_to_pixels_fwd_kernel(
 
         // process gaussians in the current batch for this pixel
         uint32_t batch_size = min(block_size, range_end - batch_start);
-        for (uint32_t t = 0; (t < batch_size) && !done; ++t) {
+        for (uint32_t t = 0; (t < batch_size) && !done; ++t) 
+        {
             const float3 conic = conic_batch[t];
             const float3 xy_opac = xy_opacity_batch[t];
             const float opac = xy_opac.z;
@@ -608,12 +618,14 @@ __global__ void rasterize_to_pixels_fwd_kernel(
                 0.5f * (conic.x * delta.x * delta.x + conic.z * delta.y * delta.y) +
                 conic.y * delta.x * delta.y;
             float alpha = min(0.999f, opac * __expf(-sigma));
-            if (sigma < 0.f || alpha < 1.f / 255.f) {
+            if (sigma < 0.f || alpha < 1.f / 255.f) 
+            {
                 continue;
             }
 
             const float next_T = T * (1.0f - alpha);
-            if (next_T <= 1e-4) { // this pixel is done: exclusive
+            if (next_T <= 1e-4) // this pixel is done: exclusive
+            { 
                 done = true;
                 break;
             }
@@ -622,7 +634,8 @@ __global__ void rasterize_to_pixels_fwd_kernel(
             const float vis = alpha * T;
             const float *c_ptr = colors + g * COLOR_DIM;
             PRAGMA_UNROLL
-            for (uint32_t k = 0; k < COLOR_DIM; ++k) {
+            for (uint32_t k = 0; k < COLOR_DIM; ++k) 
+            {
                 pix_out[k] += c_ptr[k] * vis;
             }
             cur_idx = batch_start + t;
@@ -631,24 +644,28 @@ __global__ void rasterize_to_pixels_fwd_kernel(
         }
     }
 
-    if (inside) {
+    if (inside) 
+    {
         // Here T is the transmittance AFTER the last gaussian in this pixel.
         // We (should) store double precision as T would be used in backward pass and
         // it can be very small and causing large diff in gradients with float32.
         // However, double precision makes the backward pass 1.5x slower so we stick
         // with float for now.
         render_alphas[pix_id] = 1.0f - T;
+        render_depths[pix_id] = 0.0f;
+
         PRAGMA_UNROLL
-        for (uint32_t k = 0; k < COLOR_DIM; ++k) {
-            render_colors[pix_id * COLOR_DIM + k] =
-                backgrounds == nullptr ? pix_out[k] : (pix_out[k] + T * backgrounds[k]);
+        for (uint32_t k = 0; k < COLOR_DIM; ++k) 
+        {
+            render_colors[pix_id * COLOR_DIM + k] = backgrounds == nullptr ? pix_out[k] : (pix_out[k] + T * backgrounds[k]);
+            render_normals[pix_id * COLOR_DIM + k] = 0.0f;
         }
         // index in bin of last gaussian in this pixel
         last_ids[pix_id] = static_cast<int32_t>(cur_idx);
     }
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_tensor(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_tensor(
     // Gaussian parameters
     const torch::Tensor &means2d,   // [C, N, 2] or [nnz, 2]
     const torch::Tensor &conics,    // [C, N, 3] or [nnz, 3]
@@ -689,6 +706,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
                                          means2d.options().dtype(torch::kFloat32));
     torch::Tensor alphas = torch::empty({C, image_height, image_width, 1},
                                         means2d.options().dtype(torch::kFloat32));
+    torch::Tensor normals = torch::empty({C, image_height, image_width, channels},
+                                         means2d.options().dtype(torch::kFloat32));
+    torch::Tensor depths = torch::empty({C, image_height, image_width, 1},
+                                        means2d.options().dtype(torch::kFloat32));
     torch::Tensor last_ids = torch::empty({C, image_height, image_width},
                                           means2d.options().dtype(torch::kInt32));
 
@@ -707,6 +728,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     case 2:
@@ -718,6 +740,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     case 3:
@@ -729,6 +752,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     case 4:
@@ -740,6 +764,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     case 8:
@@ -751,6 +776,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     case 16:
@@ -762,6 +788,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     case 32:
@@ -773,6 +800,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     case 64:
@@ -784,6 +812,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     case 128:
@@ -795,6 +824,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     case 256:
@@ -806,6 +836,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     case 512:
@@ -817,12 +848,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rasterize_to_pixels_fwd_
             image_width, image_height, tile_size, tile_width, tile_height,
             tile_offsets.data_ptr<int32_t>(), flatten_ids.data_ptr<int32_t>(),
             renders.data_ptr<float>(), alphas.data_ptr<float>(),
+            normals.data_ptr<float>(), depths.data_ptr<float>(),
             last_ids.data_ptr<int32_t>());
         break;
     default:
         AT_ERROR("Unsupported number of channels: ", channels);
     }
-    return std::make_tuple(renders, alphas, last_ids);
+    return std::make_tuple(renders, alphas, normals, depths, last_ids);
 }
 
 template <uint32_t COLOR_DIM>
